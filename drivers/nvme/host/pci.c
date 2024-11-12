@@ -36,8 +36,6 @@
 
 #include "nvme.h"
 
-#include "nvme-qcom.h"
-
 #define SQ_SIZE(depth)		(depth * sizeof(struct nvme_command))
 #define CQ_SIZE(depth)		(depth * sizeof(struct nvme_completion))
 
@@ -2351,6 +2349,13 @@ static unsigned long check_vendor_combination_bug(struct pci_dev *pdev)
 			return NVME_QUIRK_NO_APST;
 	}
 
+	/*
+	 * NVMe SSD drops off the PCIe bus after system idle
+	 * for 10 hours on a Lenovo N60z board.
+	 */
+	if (dmi_match(DMI_BOARD_NAME, "LXKT-ZXEG-N6"))
+		return NVME_QUIRK_NO_APST;
+
 	return 0;
 }
 
@@ -2374,11 +2379,6 @@ static int nvme_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 		goto free;
 
 	dev->dev = get_device(&pdev->dev);
-	/* Parse dt parameters and configure SMMU*/
-	result = nvme_qcom_parse_dt(&pdev->dev);
-	if (result)
-		goto free;
-
 	pci_set_drvdata(pdev, dev);
 
 	result = nvme_dev_map(dev);
@@ -2408,7 +2408,6 @@ static int nvme_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	return 0;
 
  release_pools:
-	nvme_qcom_release_mapping(&pdev->dev);
 	nvme_release_prp_pools(dev);
  unmap:
 	nvme_dev_unmap(dev);
@@ -2468,7 +2467,6 @@ static void nvme_remove(struct pci_dev *pdev)
 	nvme_release_prp_pools(dev);
 	nvme_dev_unmap(dev);
 	nvme_put_ctrl(&dev->ctrl);
-	nvme_qcom_release_mapping(&pdev->dev);
 }
 
 static int nvme_pci_sriov_configure(struct pci_dev *pdev, int numvfs)
@@ -2585,8 +2583,6 @@ static const struct pci_device_id nvme_id_table[] = {
 		.driver_data = NVME_QUIRK_DELAY_BEFORE_CHK_RDY, },
 	{ PCI_DEVICE(0x1c58, 0x0023),	/* WDC SN200 adapter */
 		.driver_data = NVME_QUIRK_DELAY_BEFORE_CHK_RDY, },
-	{ PCI_DEVICE(0x1c5c, 0x1327),
-		.driver_data = NVME_QUIRK_DELAY_BEFORE_CHK_RDY, },
 	{ PCI_DEVICE(0x1c5f, 0x0540),	/* Memblaze Pblaze4 adapter */
 		.driver_data = NVME_QUIRK_DELAY_BEFORE_CHK_RDY, },
 	{ PCI_DEVICE(0x144d, 0xa821),   /* Samsung PM1725 */
@@ -2604,8 +2600,6 @@ static const struct pci_device_id nvme_id_table[] = {
 		.driver_data = NVME_QUIRK_NO_DEEPEST_PS, },
 	{ PCI_DEVICE(PCI_VENDOR_ID_APPLE, 0x2001) },
 	{ PCI_DEVICE(PCI_VENDOR_ID_APPLE, 0x2003) },
-	{ PCI_DEVICE(0x1179, 0x0115) }, /* TOSHIBA 4.0 device */
-	{ PCI_DEVICE(0x1179, 0x0116) }, /* TOSHIBA 5.0 device */
 	{ 0, }
 };
 MODULE_DEVICE_TABLE(pci, nvme_id_table);

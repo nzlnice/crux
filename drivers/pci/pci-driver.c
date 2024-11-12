@@ -440,15 +440,20 @@ static int pci_device_remove(struct device *dev)
 	struct pci_dev *pci_dev = to_pci_dev(dev);
 	struct pci_driver *drv = pci_dev->driver;
 
-	if (drv) {
-		if (drv->remove) {
-			pm_runtime_get_sync(dev);
-			drv->remove(pci_dev);
-			pm_runtime_put_noidle(dev);
-		}
-		pcibios_free_irq(pci_dev);
-		pci_dev->driver = NULL;
+	if (drv->remove) {
+		pm_runtime_get_sync(dev);
+		/*
+		 * If the driver provides a .runtime_idle() callback and it has
+		 * started to run already, it may continue to run in parallel
+		 * with the code below, so wait until all of the runtime PM
+		 * activity has completed.
+		 */
+		pm_runtime_barrier(dev);
+		drv->remove(pci_dev);
+		pm_runtime_put_noidle(dev);
 	}
+	pcibios_free_irq(pci_dev);
+	pci_dev->driver = NULL;
 
 	/* Undo the runtime PM settings in local_pci_probe() */
 	pm_runtime_put_sync(dev);
@@ -801,10 +806,6 @@ static int pci_pm_suspend_noirq(struct device *dev)
 		}
 	}
 
-	/* if d3hot is not supported bail out */
-	if (pci_dev->no_d3hot)
-		return 0;
-
 	if (!pci_dev->state_saved) {
 		pci_save_state(pci_dev);
 		if (pci_power_manageable(pci_dev))
@@ -837,8 +838,7 @@ static int pci_pm_resume_noirq(struct device *dev)
 	struct device_driver *drv = dev->driver;
 	int error = 0;
 
-	if (!pci_dev->no_d3hot)
-		pci_pm_default_resume_early(pci_dev);
+	pci_pm_default_resume_early(pci_dev);
 
 	if (pci_has_legacy_pm_support(pci_dev))
 		return pci_legacy_resume_early(dev);
@@ -1216,10 +1216,6 @@ static int pci_pm_runtime_suspend(struct device *dev)
 		return 0;
 	}
 
-	/* if d3hot is not supported bail out */
-	if (pci_dev->no_d3hot)
-		return 0;
-
 	if (!pci_dev->state_saved) {
 		pci_save_state(pci_dev);
 		pci_finish_runtime_suspend(pci_dev);
@@ -1233,10 +1229,6 @@ static int pci_pm_runtime_resume(struct device *dev)
 	int rc;
 	struct pci_dev *pci_dev = to_pci_dev(dev);
 	const struct dev_pm_ops *pm = dev->driver ? dev->driver->pm : NULL;
-
-	/* we skipped d3hot processing so skip re-init */
-	if (pci_dev->no_d3hot)
-		goto skip_restore;
 
 	/*
 	 * Restoring config space is necessary even if the device is not bound
@@ -1255,7 +1247,6 @@ static int pci_pm_runtime_resume(struct device *dev)
 	pci_enable_wake(pci_dev, PCI_D0, false);
 	pci_fixup_device(pci_fixup_resume, pci_dev);
 
-skip_restore:
 	rc = pm->runtime_resume(dev);
 
 	pci_dev->runtime_d3cold = false;

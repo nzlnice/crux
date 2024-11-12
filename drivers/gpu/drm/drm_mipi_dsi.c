@@ -2,7 +2,6 @@
  * MIPI DSI Bus
  *
  * Copyright (C) 2012-2013, Samsung Electronics, Co., Ltd.
- * Copyright (C) 2021 XiaoMi, Inc.
  * Andrzej Hajda <a.hajda@samsung.com>
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
@@ -306,7 +305,8 @@ static int mipi_dsi_remove_device_fn(struct device *dev, void *priv)
 {
 	struct mipi_dsi_device *dsi = to_mipi_dsi_device(dev);
 
-	mipi_dsi_detach(dsi);
+	if (dsi->attached)
+		mipi_dsi_detach(dsi);
 	mipi_dsi_device_unregister(dsi);
 
 	return 0;
@@ -329,11 +329,18 @@ EXPORT_SYMBOL(mipi_dsi_host_unregister);
 int mipi_dsi_attach(struct mipi_dsi_device *dsi)
 {
 	const struct mipi_dsi_host_ops *ops = dsi->host->ops;
+	int ret;
 
 	if (!ops || !ops->attach)
 		return -ENOSYS;
 
-	return ops->attach(dsi->host, dsi);
+	ret = ops->attach(dsi->host, dsi);
+	if (ret)
+		return ret;
+
+	dsi->attached = true;
+
+	return 0;
 }
 EXPORT_SYMBOL(mipi_dsi_attach);
 
@@ -345,8 +352,13 @@ int mipi_dsi_detach(struct mipi_dsi_device *dsi)
 {
 	const struct mipi_dsi_host_ops *ops = dsi->host->ops;
 
+	if (WARN_ON(!dsi->attached))
+		return -EINVAL;
+
 	if (!ops || !ops->detach)
 		return -ENOSYS;
+
+	dsi->attached = false;
 
 	return ops->detach(dsi->host, dsi);
 }
@@ -362,7 +374,6 @@ static ssize_t mipi_dsi_device_transfer(struct mipi_dsi_device *dsi,
 
 	if (dsi->mode_flags & MIPI_DSI_MODE_LPM)
 		msg->flags |= MIPI_DSI_MSG_USE_LPM;
-	msg->flags |= MIPI_DSI_MSG_LASTCOMMAND;
 
 	return ops->transfer(dsi->host, msg);
 }
@@ -396,7 +407,6 @@ bool mipi_dsi_packet_format_is_short(u8 type)
 	case MIPI_DSI_DCS_SHORT_WRITE_PARAM:
 	case MIPI_DSI_DCS_READ:
 	case MIPI_DSI_SET_MAXIMUM_RETURN_PACKET_SIZE:
-	case MIPI_DSI_COMPRESSION_MODE:
 		return true;
 	}
 
@@ -428,7 +438,6 @@ bool mipi_dsi_packet_format_is_long(u8 type)
 	case MIPI_DSI_PACKED_PIXEL_STREAM_18:
 	case MIPI_DSI_PIXEL_STREAM_3BYTE_18:
 	case MIPI_DSI_PACKED_PIXEL_STREAM_24:
-	case MIPI_DSI_PPS:
 		return true;
 	}
 
@@ -459,7 +468,7 @@ int mipi_dsi_create_packet(struct mipi_dsi_packet *packet,
 		return -EINVAL;
 
 	memset(packet, 0, sizeof(*packet));
-	packet->header[2] = ((msg->channel & 0x3) << 6) | (msg->type & 0x3f);
+	packet->header[0] = ((msg->channel & 0x3) << 6) | (msg->type & 0x3f);
 
 	/* TODO: compute ECC if hardware support is not available */
 
@@ -471,16 +480,16 @@ int mipi_dsi_create_packet(struct mipi_dsi_packet *packet,
 	 * and 2.
 	 */
 	if (mipi_dsi_packet_format_is_long(msg->type)) {
-		packet->header[0] = (msg->tx_len >> 0) & 0xff;
-		packet->header[1] = (msg->tx_len >> 8) & 0xff;
+		packet->header[1] = (msg->tx_len >> 0) & 0xff;
+		packet->header[2] = (msg->tx_len >> 8) & 0xff;
 
 		packet->payload_length = msg->tx_len;
 		packet->payload = msg->tx_buf;
 	} else {
 		const u8 *tx = msg->tx_buf;
 
-		packet->header[0] = (msg->tx_len > 0) ? tx[0] : 0;
-		packet->header[1] = (msg->tx_len > 1) ? tx[1] : 0;
+		packet->header[1] = (msg->tx_len > 0) ? tx[0] : 0;
+		packet->header[2] = (msg->tx_len > 1) ? tx[1] : 0;
 	}
 
 	packet->size = sizeof(packet->header) + packet->payload_length;
@@ -1045,20 +1054,6 @@ int mipi_dsi_dcs_set_tear_scanline(struct mipi_dsi_device *dsi, u16 scanline)
 	return 0;
 }
 EXPORT_SYMBOL(mipi_dsi_dcs_set_tear_scanline);
-
-int mipi_dsi_dcs_set_display_brightness_ss(struct mipi_dsi_device *dsi,
-					u16 brightness)
-{
-	u8 payload[2] = { brightness >> 8, brightness & 0xff };
-	ssize_t err;
-
-	err = mipi_dsi_dcs_write(dsi, MIPI_DCS_SET_DISPLAY_BRIGHTNESS,
-				 payload, sizeof(payload));
-	if (err < 0)
-		return err;
-
-	return 0;
-}
 
 /**
  * mipi_dsi_dcs_set_display_brightness() - sets the brightness value of the

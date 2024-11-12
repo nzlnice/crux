@@ -281,7 +281,7 @@ struct _scsi_io_transfer {
  * Note: The logging levels are defined in mpt3sas_debug.h.
  */
 static int
-_scsih_set_debug_level(const char *val, const struct kernel_param *kp)
+_scsih_set_debug_level(const char *val, struct kernel_param *kp)
 {
 	int ret = param_set_int(val, kp);
 	struct MPT3SAS_ADAPTER *ioc;
@@ -9482,8 +9482,10 @@ _mpt3sas_init(void)
 	mpt3sas_ctl_init(hbas_to_enumerate);
 
 	error = pci_register_driver(&mpt3sas_driver);
-	if (error)
+	if (error) {
+		mpt3sas_ctl_exit(hbas_to_enumerate);
 		scsih_exit();
+	}
 
 	return error;
 }

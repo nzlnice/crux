@@ -43,8 +43,6 @@
 #include <linux/input/mt.h>
 #include "../input-compat.h"
 
-static DEFINE_MUTEX(uinput_glb_mutex);
-
 static int uinput_dev_event(struct input_dev *dev,
 			    unsigned int type, unsigned int code, int value)
 {
@@ -378,6 +376,20 @@ static int uinput_validate_absinfo(struct input_dev *dev, unsigned int code,
 		return -EINVAL;
 	}
 
+	/*
+	 * Limit number of contacts to a reasonable value (100). This
+	 * ensures that we need less than 2 pages for struct input_mt
+	 * (we are not using in-kernel slot assignment so not going to
+	 * allocate memory for the "red" table), and we should have no
+	 * trouble getting this much memory.
+	 */
+	if (code == ABS_MT_SLOT && max > 99) {
+		printk(KERN_DEBUG
+		       "%s: unreasonably large number of slots requested: %d\n",
+		       UINPUT_NAME, max);
+		return -EINVAL;
+	}
+
 	return 0;
 }
 
@@ -678,17 +690,9 @@ static unsigned int uinput_poll(struct file *file, poll_table *wait)
 static int uinput_release(struct inode *inode, struct file *file)
 {
 	struct uinput_device *udev = file->private_data;
-	int retval;
-
-	retval = mutex_lock_interruptible(&uinput_glb_mutex);
-	if (retval)
-		return retval;
 
 	uinput_destroy_device(udev);
-	file->private_data = NULL;
 	kfree(udev);
-
-	mutex_unlock(&uinput_glb_mutex);
 
 	return 0;
 }
@@ -820,7 +824,7 @@ static long uinput_ioctl_handler(struct file *file, unsigned int cmd,
 				 unsigned long arg, void __user *p)
 {
 	int			retval;
-	struct uinput_device	*udev;
+	struct uinput_device	*udev = file->private_data;
 	struct uinput_ff_upload ff_up;
 	struct uinput_ff_erase  ff_erase;
 	struct uinput_request   *req;
@@ -828,19 +832,9 @@ static long uinput_ioctl_handler(struct file *file, unsigned int cmd,
 	const char		*name;
 	unsigned int		size;
 
-	retval = mutex_lock_interruptible(&uinput_glb_mutex);
-	if (retval)
-		return retval;
-
-	udev = file->private_data;
-	if (!udev) {
-		retval = -EINVAL;
-		goto unlock_glb_mutex;
-	}
-
 	retval = mutex_lock_interruptible(&udev->mutex);
 	if (retval)
-		goto unlock_glb_mutex;
+		return retval;
 
 	if (!udev->dev) {
 		retval = uinput_allocate_device(udev);
@@ -1020,12 +1014,8 @@ static long uinput_ioctl_handler(struct file *file, unsigned int cmd,
 	}
 
 	retval = -EINVAL;
-
  out:
 	mutex_unlock(&udev->mutex);
-
- unlock_glb_mutex:
-	mutex_unlock(&uinput_glb_mutex);
 	return retval;
 }
 

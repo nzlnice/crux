@@ -1135,6 +1135,7 @@ static void acpi_ec_remove_query_handlers(struct acpi_ec *ec,
 void acpi_ec_remove_query_handler(struct acpi_ec *ec, u8 query_bit)
 {
 	acpi_ec_remove_query_handlers(ec, false, query_bit);
+	flush_workqueue(ec_query_wq);
 }
 EXPORT_SYMBOL_GPL(acpi_ec_remove_query_handler);
 
@@ -1311,10 +1312,13 @@ acpi_ec_space_handler(u32 function, acpi_physical_address address,
 	if (ec->busy_polling || bits > 8)
 		acpi_ec_burst_enable(ec);
 
-	for (i = 0; i < bytes; ++i, ++address, ++value)
+	for (i = 0; i < bytes; ++i, ++address, ++value) {
 		result = (function == ACPI_READ) ?
 			acpi_ec_read(ec, address, value) :
 			acpi_ec_write(ec, address, *value);
+		if (result < 0)
+			break;
+	}
 
 	if (ec->busy_polling || bits > 8)
 		acpi_ec_burst_disable(ec);
@@ -1326,8 +1330,10 @@ acpi_ec_space_handler(u32 function, acpi_physical_address address,
 		return AE_NOT_FOUND;
 	case -ETIME:
 		return AE_TIME;
-	default:
+	case 0:
 		return AE_OK;
+	default:
+		return AE_ERROR;
 	}
 }
 
@@ -2023,8 +2029,7 @@ static const struct dev_pm_ops acpi_ec_pm = {
 	SET_SYSTEM_SLEEP_PM_OPS(acpi_ec_suspend, acpi_ec_resume)
 };
 
-static int param_set_event_clearing(const char *val,
-				    const struct kernel_param *kp)
+static int param_set_event_clearing(const char *val, struct kernel_param *kp)
 {
 	int result = 0;
 
@@ -2042,8 +2047,7 @@ static int param_set_event_clearing(const char *val,
 	return result;
 }
 
-static int param_get_event_clearing(char *buffer,
-				    const struct kernel_param *kp)
+static int param_get_event_clearing(char *buffer, struct kernel_param *kp)
 {
 	switch (ec_event_clearing) {
 	case ACPI_EC_EVT_TIMING_STATUS:

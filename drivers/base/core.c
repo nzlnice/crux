@@ -27,6 +27,7 @@
 #include <linux/mutex.h>
 #include <linux/pm_runtime.h>
 #include <linux/netdevice.h>
+#include <linux/rcupdate.h>
 #include <linux/sched/signal.h>
 #include <linux/sysfs.h>
 
@@ -673,11 +674,6 @@ int lock_device_hotplug_sysfs(void)
 	return restart_syscall();
 }
 
-void lock_device_hotplug_assert(void)
-{
-	lockdep_assert_held(&device_hotplug_lock);
-}
-
 #ifdef CONFIG_BLOCK
 static inline int device_is_not_partition(struct device *dev)
 {
@@ -905,6 +901,7 @@ static int dev_uevent(struct kset *kset, struct kobject *kobj,
 		      struct kobj_uevent_env *env)
 {
 	struct device *dev = kobj_to_dev(kobj);
+	struct device_driver *driver;
 	int retval = 0;
 
 	/* add device node properties if present */
@@ -933,8 +930,12 @@ static int dev_uevent(struct kset *kset, struct kobject *kobj,
 	if (dev->type && dev->type->name)
 		add_uevent_var(env, "DEVTYPE=%s", dev->type->name);
 
-	if (dev->driver)
-		add_uevent_var(env, "DRIVER=%s", dev->driver->name);
+	/* Synchronize with module_remove_driver() */
+	rcu_read_lock();
+	driver = READ_ONCE(dev->driver);
+	if (driver)
+		add_uevent_var(env, "DRIVER=%s", driver->name);
+	rcu_read_unlock();
 
 	/* Add common DT information about the device */
 	of_device_uevent(dev, env);
@@ -1669,8 +1670,8 @@ static int device_add_class_symlinks(struct device *dev)
 	struct device_node *of_node = dev_of_node(dev);
 	int error;
 
-	if (of_node && of_node_kobj(of_node)) {
-		error = sysfs_create_link(&dev->kobj, of_node_kobj(of_node), "of_node");
+	if (of_node) {
+		error = sysfs_create_link(&dev->kobj, &of_node->kobj,"of_node");
 		if (error)
 			dev_warn(dev, "Error %d creating of_node link\n",error);
 		/* An error here doesn't warrant bringing down the device */
@@ -3079,6 +3080,50 @@ define_dev_printk_level(dev_notice, KERN_NOTICE);
 define_dev_printk_level(_dev_info, KERN_INFO);
 
 #endif
+
+/**
+ * dev_err_probe - probe error check and log helper
+ * @dev: the pointer to the struct device
+ * @err: error value to test
+ * @fmt: printf-style format string
+ * @...: arguments as specified in the format string
+ *
+ * This helper implements common pattern present in probe functions for error
+ * checking: print debug or error message depending if the error value is
+ * -EPROBE_DEFER and propagate error upwards.
+ * It replaces code sequence::
+ * 	if (err != -EPROBE_DEFER)
+ * 		dev_err(dev, ...);
+ * 	else
+ * 		dev_dbg(dev, ...);
+ * 	return err;
+ *
+ * with::
+ *
+ * 	return dev_err_probe(dev, err, ...);
+ *
+ * Returns @err.
+ *
+ */
+int dev_err_probe(const struct device *dev, int err, const char *fmt, ...)
+{
+	struct va_format vaf;
+	va_list args;
+
+	va_start(args, fmt);
+	vaf.fmt = fmt;
+	vaf.va = &args;
+
+	if (err != -EPROBE_DEFER)
+		dev_err(dev, "error %pe: %pV", ERR_PTR(err), &vaf);
+	else
+		dev_dbg(dev, "error %pe: %pV", ERR_PTR(err), &vaf);
+
+	va_end(args);
+
+	return err;
+}
+EXPORT_SYMBOL_GPL(dev_err_probe);
 
 static inline bool fwnode_is_primary(struct fwnode_handle *fwnode)
 {
